@@ -1,4 +1,5 @@
 from langchain.text_splitter import TokenTextSplitter
+from langchain.docstore.document import Document
 
 basic_search_retriever_prompt = """
 You will be given a conversation below and a follow up question. You need to rephrase the follow-up question if needed so it is a standalone question that can be used by the LLM to search the web for information.
@@ -52,14 +53,17 @@ def refine_query(llm, query, chat_history=None):
 
 
 def summarize_websearch_conversation(
-    llm, query, context=None, chunk_size: int = 1024, stream: bool = False
+    llm, query, context, chunk_size: int = 2048, stream: bool = False
 ):
     prompt = basic_web_search_response_prompt.format(context=context, query=query)
-    spliter = TokenTextSplitter(chunk_size=chunk_size)
-    doc = spliter.create_documents([prompt])
-    split_docs = spliter.split_documents(doc)
-    prompt_template = split_docs[0]
+    prompt = Document(page_content=prompt)
+    # spliter = TokenTextSplitter(chunk_size=chunk_size)
+    # doc = spliter.create_documents([prompt])
+    # print(2)
+    # split_docs = spliter.split_documents(doc)
+    # prompt_template = split_docs[0]
+    print("Content: ", prompt.page_content)
     if not stream:
-        return iter([llm.invoke(prompt_template.page_content)])
+        return iter([llm.invoke(prompt.page_content)])
 
-    return llm.stream(prompt_template.page_content)
+    return llm.stream(prompt.page_content)
