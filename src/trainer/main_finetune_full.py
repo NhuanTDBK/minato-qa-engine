@@ -506,10 +506,14 @@ def main(seed: int = 3407):
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.model_name,
     )
-    tokenizer.pad_token = (
-        tokenizer.unk_token
-    )  # use unk rather than eos token to prevent endless generation
-    tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids(tokenizer.pad_token)
+    # tokenizer.pad_token = (
+    #     tokenizer.unk_token
+    # )  # use unk rather than eos token to prevent endless generation
+    # tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids(tokenizer.pad_token)
+    if getattr(tokenizer, "pad_token"):
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+
     EOS_TOKEN = tokenizer.eos_token  # Must add EOS_TOKEN
 
     logger.info("*** Load pretrained model ***")
@@ -518,21 +522,11 @@ def main(seed: int = 3407):
     )
     quantization_config = get_quantization_config(model_args)
 
-    model_kwargs = dict(
-        trust_remote_code=True,
-        attn_implementation=training_args.attn_implementation,
-        torch_dtype=torch_dtype,
-        device_map=get_kbit_device_map() if quantization_config is not None else None,
-        quantization_config=quantization_config,
-        # low_cpu_mem_usage=True,
-    )
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
         mlm=False,
     )
-    model = AutoModelForCausalLM.from_pretrained(
-        model_args.model_name, **model_kwargs
-    ).to(device)
+
     # Train the model
     # @title Show current memory stats
     if torch.cuda.is_available():
@@ -558,6 +552,16 @@ def main(seed: int = 3407):
         .shuffle(seed=seed)
         .remove_columns(["input", "response", "instruction"])
     )
+
+    model_kwargs = dict(
+        trust_remote_code=True,
+        attn_implementation=training_args.attn_implementation,
+        torch_dtype=torch_dtype,
+        device_map=get_kbit_device_map() if quantization_config is not None else "auto",
+        quantization_config=quantization_config,
+        low_cpu_mem_usage=True,
+    )
+    model = AutoModelForCausalLM.from_pretrained(model_args.model_name, **model_kwargs)
 
     trainer = Trainer(
         model=model,
