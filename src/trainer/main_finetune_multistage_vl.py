@@ -2,11 +2,11 @@ from functools import partial
 import logging
 import os
 from typing import Any, Dict, List, NewType, Optional, Tuple
-
 from dataclasses import dataclass, field
-from datasets import load_dataset
 
 import torch
+from tqdm import tqdm
+from datasets import load_dataset
 from unsloth import FastVisionModel
 from accelerate import Accelerator
 from transformers import (
@@ -17,9 +17,8 @@ from transformers import (
     Qwen2VLForConditionalGeneration,
     Qwen2VLProcessor,
     AutoTokenizer,
-    TrainingArguments,
 )
-from liger_kernel.transformers import monkey_patch
+
 from trl import SFTTrainer, SFTConfig as AllSFTConfig
 from qwen_vl_utils import process_vision_info
 from transformers.trainer_utils import get_last_checkpoint
@@ -31,7 +30,8 @@ logger.addHandler(logging.StreamHandler())
 MODEL_CONFIG_CLASSES = list(MODEL_FOR_CAUSAL_LM_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
 
-
+# Or completely disable
+torch._dynamo.config.disable = True
 DataClassType = NewType("DataClassType", Any)
 
 
@@ -226,7 +226,7 @@ class SFTConfig:
             "help": ("Whether to log and evaluate the first global_step or not.")
         },
     )
-    optim: Optional[str] = field(default="adamw_torch")
+    optim: Optional[str] = field(default="adamw_torch_fused")
     train_batch_size: Optional[int] = field(
         default=4,
         metadata={"help": ("The batch size for training.")},
@@ -288,51 +288,6 @@ class SFTConfig:
     fsdp: Optional[str] = field(default="", metadata={"help": ("The fsdp.")})
     fsdp_config: Optional[str] = field(
         default=None, metadata={"help": ("The fsdp config.")}
-    )
-
-
-@dataclass
-class DPOConfig(TrainingArguments):
-    """
-    Arguments related to the DPO training process itself. For all parameters, see: https://huggingface.co/docs/transformers/v4.26.1/en/main_classes/trainer#transformers.TrainingArguments
-    """
-
-    beta: Optional[float] = field(
-        default=0.1,
-        metadata={
-            "help": "The beta factor in DPO loss. Higher beta means less divergence from the initial policy."
-        },
-    )
-    hub_model_revision: Optional[str] = field(
-        default="main",
-        metadata={"help": ("The Hub model branch to push the model to.")},
-    )
-    logging_first_step: bool = field(
-        default=True,
-        metadata={
-            "help": ("Whether to log and evaluate the first global_step or not.")
-        },
-    )
-    max_prompt_length: Optional[int] = field(
-        default=None,
-        metadata={
-            "help": (
-                "For DPO, the maximum length of the prompt to use for conditioning the model."
-            )
-        },
-    )
-    max_length: Optional[int] = field(
-        default=None,
-        metadata={
-            "help": (
-                "Used by TRL for reward model training, which tries to read this parameter in init."
-            )
-        },
-    )
-    optim: Optional[str] = field(default="rmsprop")
-    remove_unused_columns: bool = field(default=False)
-    loss_type: Optional[str] = field(
-        default="sigmoid", metadata={"help": ("The loss type for DPO.")}
     )
 
 
@@ -468,17 +423,22 @@ def format_message(sample: str, system_message: str):
         else:
             content.insert(0, {"type": "image", "image": sample["image"]})
 
-    return [
+    conversation = [
         {
             "role": "system",
             "content": [{"type": "text", "text": system_message}],
         },
         {"role": "user", "content": content},
-        {
-            "role": "assistant",
-            "content": [{"type": "text", "text": sample["response"]}],
-        },
     ]
+    if "response" in sample:
+        conversation.append(
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": sample["response"]}],
+            }
+        )
+
+    return conversation
 
 
 def get_text_dataset():
@@ -520,13 +480,92 @@ def get_visual_dataset():
     return [format_message(row, REDDIT_SYSTEM_MESSAGE) for row in ds_sft_reddit]
 
 
+def generate_text_from_sample(
+    model: Qwen2VLForConditionalGeneration,
+    processor: Qwen2VLProcessor,
+    sample,
+    max_new_tokens=32,
+    device="cuda",
+    **generation_kwargs,
+):
+    # Prepare the text input by applying the chat template
+    text_input = processor.apply_chat_template(
+        sample,
+        tokenize=False,
+        add_generation_prompt=True,  # Use the sample without the system message
+    )
+
+    # Process the visual input from the sample
+    if "image" not in sample or sample["image"] is None:
+        image_inputs = None
+    else:
+        image_inputs, _ = process_vision_info(sample)
+
+    # Prepare the inputs for the model
+    model_inputs = processor(
+        text=[text_input],
+        images=image_inputs,
+        return_tensors="pt",
+    ).to(
+        device
+    )  # Move inputs to the specified device
+    # return model_inputs
+
+    # Generate text with the model
+    generated_ids = model.generate(
+        **model_inputs, max_new_tokens=max_new_tokens, **generation_kwargs
+    )
+
+    # Trim the generated ids to remove the input ids
+    trimmed_generated_ids = [
+        out_ids[len(in_ids) :]
+        for in_ids, out_ids in zip(model_inputs.input_ids, generated_ids)
+    ]
+
+    # Decode the output text
+    output_text = processor.batch_decode(
+        trimmed_generated_ids,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )
+
+    return output_text[0]  # Return the first decoded output text
+
+
+def evaluate_visual_metrics(model, processor):
+    import evaluate
+
+    bleu = evaluate.load("bleu")
+    rouge = evaluate.load("rouge")
+
+    ds = load_dataset("SteveTran/naruto-visual-qa", split="character")
+    responses = ds["answer"]
+    ds_qa = ds.map(
+        lambda d: {
+            "query": d["question"] + "\n Give an answer only, no furthur explanation",
+        },
+    )
+    examples = [
+        format_message(ds_qa[i], REDDIT_SYSTEM_MESSAGE) for i in range(len(ds_qa))
+    ]
+    answers = [
+        generate_text_from_sample(model, processor, sample, max_new_tokens=512)
+        for sample in tqdm(examples)
+    ]
+
+    bleu_score = bleu.compute(references=responses, predictions=answers)
+    rough_score = rouge.compute(references=responses, predictions=answers)
+
+    return bleu_score, rough_score
+
+
 def main(seed: int = 3407):
     # Set seed for reproducibility
     set_seed(seed)
     device = "cpu"
     if torch.cuda.is_available():
         device = "cuda"
-
+    torch_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     model_args, data_args, training_args = parse_args()
 
     # Check for last checkpoint
@@ -558,6 +597,7 @@ def main(seed: int = 3407):
             model_name=model_args.model_name,
             max_seq_length=training_args.max_seq_length,
             load_in_4bit=model_args.load_in_4bit,
+            dtype=torch_dtype,
         )
         model = FastVisionModel.get_peft_model(
             model,
@@ -577,10 +617,9 @@ def main(seed: int = 3407):
         model.print_trainable_parameters()
         FastVisionModel.for_training(model)
     else:
+        from liger_kernel.transformers import monkey_patch
+
         quantization_config = get_quantization_config(model_args)
-        torch_dtype = (
-            torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-        )
         model_kwargs = dict(
             trust_remote_code=True,
             attn_implementation=training_args.attn_implementation,
@@ -689,6 +728,7 @@ def main(seed: int = 3407):
             dataset_kwargs={"skip_prepare_dataset": True},  # Additional dataset options
             fsdp=training_args.fsdp,
             fsdp_config=training_args.fsdp_config,
+            report_to="tensorboard",
         ),
     )
 
@@ -730,15 +770,14 @@ def main(seed: int = 3407):
     trainer.save_model(training_args.output_data_dir)  # Local saving
     tokenizer.save_pretrained(training_args.output_data_dir)
 
-    inputs = tokenizer(
-        ["Describe about this character Jiraiya"],
-        return_tensors="pt",
-    ).to(device)
+    FastVisionModel.for_inference(model)
+    print(evaluate_visual_metrics(model, processor))
 
-    outputs = trainer.model.generate(
-        **inputs, max_new_tokens=512, use_cache=True, temperature=0.7
-    )
-    print("Answer: ", tokenizer.batch_decode(outputs))
+    example = {
+        "query": "Describe about this character Jiraiya",
+    }
+    answer = generate_text_from_sample(model, processor, example, max_new_tokens=512)
+    print(answer)
 
 
 if __name__ == "__main__":
