@@ -340,7 +340,9 @@ def parse_args() -> Tuple[ModelArguments, DataArguments, SFTConfig]:
     return parser.parse_args_into_dataclasses()
 
 
-REDDIT_SYSTEM_MESSAGE = """You are an expert Vision Language Model specialized in the Naruto universe, combining deep knowledge of the manga and anime with advanced visual analysis capabilities"""
+REDDIT_SYSTEM_MESSAGE = """You are an helpful assistant specialized in the Naruto universe, combining deep knowledge of the manga and anime with advanced visual analysis capabilities.
+Your task is to analyze the provided image and respond to queries with concise answers"""
+
 REDDIT_GUIDELINE = """
 # Guideline
 Identify the type of question being asked and then provide an appropriately structured response.
