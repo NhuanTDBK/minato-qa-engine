@@ -496,7 +496,6 @@ def get_visual_dataset():
     ds_reddit = load_dataset("SteveTran/naruto-vision-prompts")
     ds_sft_reddit = (
         ds_reddit["train"]
-        .map(lambda d: )
         .filter(lambda d: d["image"] is not None, num_proc=4)
         .shuffle()
     )
