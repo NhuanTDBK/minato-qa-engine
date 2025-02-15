@@ -290,6 +290,10 @@ class SFTConfig:
         default=None, metadata={"help": ("The fsdp config.")}
     )
 
+    evaluate_before_training: Optional[bool] = field(
+        default=False, metadata={"help": ("Evaluate before training.")}
+    )
+
 
 def get_checkpoint(output_dir: str):
     last_checkpoint = None
@@ -444,19 +448,27 @@ def format_message(sample: str, system_message: str):
 def get_text_dataset():
     # First, fine tuning text dataset for the model
     ds_sft_qa = load_dataset("SteveTran/naruto-instruction-prompts")
-    ds_sft_qa_wiki = ds_sft_qa["wiki"].map(
-        lambda row: {
-            "query": DEFAULT_PROMPT_FORMAT.format(row["instruction"], row["input"]),
-            "response": row["response"],
-        },
-        batched=False,
+    ds_sft_qa_wiki = (
+        ds_sft_qa["wiki"]
+        .map(
+            lambda row: {
+                "query": DEFAULT_PROMPT_FORMAT.format(row["instruction"], row["input"]),
+                "response": row["response"],
+            },
+            batched=False,
+        )
+        .shuffle()
     )
-    ds_sft_qa_analyze = ds_sft_qa["analyze"].map(
-        lambda row: {
-            "query": DEFAULT_PROMPT_FORMAT.format(row["instruction"], row["input"]),
-            "response": row["response"],
-        },
-        batched=False,
+    ds_sft_qa_analyze = (
+        ds_sft_qa["analyze"]
+        .map(
+            lambda row: {
+                "query": DEFAULT_PROMPT_FORMAT.format(row["instruction"], row["input"]),
+                "response": row["response"],
+            },
+            batched=False,
+        )
+        .shuffle()
     )
 
     ds_reddit = load_dataset("SteveTran/naruto-vision-prompts")
@@ -473,8 +485,10 @@ def get_text_dataset():
 
 def get_visual_dataset():
     ds_reddit = load_dataset("SteveTran/naruto-vision-prompts")
-    ds_sft_reddit = ds_reddit["train"].filter(
-        lambda d: d["image"] is not None, num_proc=4
+    ds_sft_reddit = (
+        ds_reddit["train"]
+        .filter(lambda d: d["image"] is not None, num_proc=4)
+        .shuffle()
     )
 
     return [format_message(row, REDDIT_SYSTEM_MESSAGE) for row in ds_sft_reddit]
@@ -562,16 +576,8 @@ def evaluate_visual_metrics(model, processor):
 def main(seed: int = 3407):
     # Set seed for reproducibility
     set_seed(seed)
-    device = "cpu"
-    if torch.cuda.is_available():
-        device = "cuda"
     torch_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     model_args, data_args, training_args = parse_args()
-
-    # Check for last checkpoint
-    last_checkpoint = get_checkpoint(training_args.model_checkpoint_dir)
-    if last_checkpoint is not None and training_args.resume_from_checkpoint is None:
-        logger.info(f"Checkpoint detected, resuming training at {last_checkpoint=}.")
 
     # EOS_TOKEN = tokenizer.eos_token  # Must add EOS_TOKEN
 
@@ -599,6 +605,9 @@ def main(seed: int = 3407):
             load_in_4bit=model_args.load_in_4bit,
             dtype=torch_dtype,
         )
+        if training_args.evaluate_before_training:
+            print("Evaluate before training")
+            print(evaluate_visual_metrics(model, processor))
         model = FastVisionModel.get_peft_model(
             model,
             finetune_vision_layers=True,  # False if not finetuning vision layers
@@ -640,6 +649,9 @@ def main(seed: int = 3407):
             use_fast=True,
             trust_remote_code=True,
         )
+        if training_args.evaluate_before_training:
+            print("Evaluate before training")
+            print(evaluate_visual_metrics(model, processor))
 
     # Create a data collator to encode text and image pairs
     def collate_fn(examples, contain_image=True):
@@ -698,6 +710,11 @@ def main(seed: int = 3407):
     collate_image_fn = partial(collate_fn, contain_image=True)
 
     # Stage 1 - Text training
+    # Evaluate before training
+
+    resume_from_checkpoint = get_checkpoint(
+        os.path.join(training_args.model_checkpoint_dir, "text")
+    )
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,
@@ -732,8 +749,11 @@ def main(seed: int = 3407):
         ),
     )
 
-    trainer.train(resume_from_checkpoint=last_checkpoint)
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
+    resume_from_checkpoint = get_checkpoint(
+        os.path.join(training_args.model_checkpoint_dir, "image")
+    )
     # Stage 2 - Visual training
     trainer = SFTTrainer(
         model=model,
@@ -765,12 +785,16 @@ def main(seed: int = 3407):
         ),
     )
 
-    trainer.train(resume_from_checkpoint=last_checkpoint)
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
     trainer.save_model(training_args.output_data_dir)  # Local saving
     tokenizer.save_pretrained(training_args.output_data_dir)
 
-    FastVisionModel.for_inference(model)
+    try:
+        FastVisionModel.for_inference(model)
+    except Exception:
+        pass
+
     print(evaluate_visual_metrics(model, processor))
 
     example = {
