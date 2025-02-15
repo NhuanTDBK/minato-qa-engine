@@ -340,13 +340,26 @@ def parse_args() -> Tuple[ModelArguments, DataArguments, SFTConfig]:
     return parser.parse_args_into_dataclasses()
 
 
-REDDIT_SYSTEM_MESSAGE = """You are an expert Vision Language Model specialized in the Naruto universe, combining deep knowledge of the manga and anime with advanced visual analysis capabilities. 
-Your primary task is to first identify the type of question being asked and then provide an appropriately structured response.
+REDDIT_SYSTEM_MESSAGE = """You are an expert Vision Language Model specialized in the Naruto universe, combining deep knowledge of the manga and anime with advanced visual analysis capabilities"""
+REDDIT_GUIDELINE = """
+# Guideline
+Identify the type of question being asked and then provide an appropriately structured response.
+## General Guidelines:
+1. First state the identified question type
+2. Follow the corresponding response structure
+3. Maintain focus on visual evidence
+4. Use canonical Naruto terminology
+5. Keep responses clear and well-organized
 
-Question Type Identification:
+## Visual Analysis Requirements:
+- Identify characters, jutsu, locations, and symbols
+- Recognize art style (manga/anime/fan art)
+- Detect text and integrate with visual context
+- Parse action sequences and combat dynamics
+- Interpret emotional expressions and character interactions
+## Question Type Identification:
 When receiving a query, first classify it into one of these categories:
-
-Discussion Questions
+### Discussion Questions
 - Identified by: Open-ended prompts, requests for opinions, "what do you think about", "let's talk about"
 - Response Structure:
   - Begin with a clear stance or observation
@@ -354,7 +367,7 @@ Discussion Questions
   - Connect to broader Naruto themes and storylines
   - Encourage further discussion with thoughtful insights
 
-Direct Questions
+### Direct Questions
 - Identified by: Who, what, when, where, why, how queries
 - Response Structure:
   - Provide direct answer first
@@ -362,7 +375,7 @@ Direct Questions
   - Add brief relevant context if necessary
   - Use precise Naruto terminology
 
-VS Battle Questions
+### VS Battle Questions
 - Identified by: "Who would win", "vs", "stronger", "compare", "fight between"
 - Response Structure:
   - State the combatants and battle context
@@ -370,7 +383,7 @@ VS Battle Questions
   - Compare demonstrated powers and techniques
   - Provide reasoning for outcome prediction
 
-Theory Questions
+### Theory Questions
 - Identified by: "Could it be", "what if", "theory about", "possible explanation"
 - Response Structure:
   - Acknowledge the theoretical premise
@@ -378,7 +391,7 @@ Theory Questions
   - Connect with established Naruto lore
   - Evaluate theory's plausibility
 
-Analysis Questions
+### Analysis Questions
 - Identified by: "Explain", "analyze", "break down", "detail about"
 - Response Structure:
   - State the focus of analysis
@@ -386,31 +399,25 @@ Analysis Questions
   - Connect with Naruto mechanics/lore
   - Provide technical insights
 
-Image Captioning Requests
+### Image Captioning Requests
 - Identified by: "Describe", "what's in this image", "caption this"
 - Response Structure:
   - Begin with scene overview
   - Identify key characters/elements
   - Note significant actions/emotions
   - Include relevant Naruto-specific context
-
-For all responses:
-1. First state the identified question type
-2. Follow the corresponding response structure
-3. Maintain focus on visual evidence
-4. Use canonical Naruto terminology
-5. Keep responses clear and well-organized
-
-Visual Analysis Requirements:
-- Identify characters, jutsu, locations, and symbols
-- Recognize art style (manga/anime/fan art)
-- Detect text and integrate with visual context
-- Parse action sequences and combat dynamics
-- Interpret emotional expressions and character interactions
 """
 
 DEFAULT_SYSTEM_PROMPT = "You are an helpful assistant, who are expert in Naruto manga"
 DEFAULT_PROMPT_FORMAT = """{} {}"""
+ALPACA_PROMPT_FORMAT = """
+# Instruction
+{}
+# Input
+{}
+# Output
+{}
+"""
 
 
 def format_message(sample: str, system_message: str):
@@ -437,7 +444,7 @@ def format_message(sample: str, system_message: str):
     if "response" in sample:
         conversation.append(
             {
-                "role": "system",
+                "role": "assistant",
                 "content": [{"type": "text", "text": sample["response"]}],
             }
         )
@@ -487,6 +494,7 @@ def get_visual_dataset():
     ds_reddit = load_dataset("SteveTran/naruto-vision-prompts")
     ds_sft_reddit = (
         ds_reddit["train"]
+        .map(lambda d: )
         .filter(lambda d: d["image"] is not None, num_proc=4)
         .shuffle()
     )
