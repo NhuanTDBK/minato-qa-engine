@@ -666,7 +666,7 @@ def main(seed: int = 3407):
     def collate_fn(examples, contain_image=True):
         # Get the texts and images, and apply the chat template
         texts = [
-            processor.apply_chat_template(example, tokenize=False)
+            processor.apply_chat_template(example, tokenize=False, add_generation_prompt=False)
             for example in examples
         ]  # Prepare texts for processing
 
