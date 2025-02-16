@@ -1,9 +1,9 @@
-from functools import partial
+import random
 import torch
-from tqdm import tqdm
+import jinja2
+import evaluate
+from tqdm import tqdm, trange
 from datasets import load_dataset
-from unsloth import FastVisionModel
-from accelerate import Accelerator
 from transformers import (
     Qwen2VLForConditionalGeneration,
     Qwen2VLProcessor,
@@ -91,6 +91,96 @@ ALPACA_PROMPT_FORMAT = """
 """
 
 
+acc_metric = evaluate.load("accuracy")
+map_to_int = {chr(i): i - 65 for i in range(65, 91)}
+
+prompt_template = jinja2.Template(
+    """
+Answer the following multiple choice question about Naruto manga and anime series. Return answer (single letter) and explaination if possible
+{% for example_question in fewshot_questions %}{{example_question}}
+{% endfor %}
+Question: {{question}}
+{% for choice in choices %}{{choice["choice"]}}) {{choice["answer"]}}
+{% endfor %}
+Answer:
+"""
+)
+# prompt_template = jinja2.Template(
+#     """
+# ### Instruction
+# Answer the following are multiple choice questions about Naruto manga. Return answer (single letter) and explaination if possible
+# ### Input
+# {% for example_question in fewshot_questions %}{{example_question}}
+# {% endfor %}
+# {{question}}
+# {% for choice in choices %}{{choice["choice"]}}) {{choice["answer"]}}
+# {% endfor %}
+# ### Response
+# """
+# )
+fewshot_questions = [
+    """
+Question: How many times did Naruto fail the graduation test from the Academy?
+A) 1
+B) 2
+C) 4
+D) None of these are correct
+E) All of these are correct
+Answer:D. Naruto failed his graduation exam 3 times. He failed the graduation exam three times, but the first two failures were because he used the Shadow Clone Jutsu to create multiple clones, which was against the rules of the exam. The third time he failed was due to his lack of skills.
+""",
+    """
+Question: What is the name of Naruto’s son in the sequel series “Boruto: Naruto Next Generations”?
+Choices:
+A) Mitsuki
+B) Konohamaru
+C) Boruto Uzumaki
+D) None of these are correct
+Answer:C. Boruto Uzumaki is the son of Naruto Uzumaki and Hinata Hyuga. He is the main protagonist of the sequel series “Boruto: Naruto Next Generations.” Boruto is a member of Team Konohamaru, and he is a talented ninja who aspires to become a Hokage like his father.
+""",
+]
+
+
+def answer_binary_question(
+    model,
+    question,
+    tokenizer,
+    prompt_template=prompt_template,
+    fewshot_questions=fewshot_questions,
+):
+    prompt = prompt_template.render(
+        question=question["question"],
+        choices=question.get("choices", ""),
+        fewshot_questions=random.choices(fewshot_questions, k=1),
+    )
+    inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
+
+    with torch.no_grad():  # Disable gradient calculations
+        logits = model(**inputs).logits[0, -1].detach().cpu()
+        probs = torch.softmax(logits, dim=-1)
+        answer, prob = (
+            tokenizer.decode(torch.argmax(logits, dim=-1), skip_special_tokens=True),
+            probs.max().item(),
+        )
+        answer = answer.strip()
+
+    del probs, logits, inputs  # Explicitly delete variables
+    torch.cuda.empty_cache()  # Clear CUDA cache
+
+    return answer, prob
+
+
+def compute_score(model, tokenizer, qa_list, disable_tqdm=False):
+    predictions_tuple = [
+        answer_binary_question(model=model, tokenizer=tokenizer, question=qa_list[i])
+        for i in trange(len(qa_list), disable=disable_tqdm)
+    ]
+    predictions = [map_to_int.get(answer, -1) for answer, _ in predictions_tuple]
+    references = [map_to_int[qa["answer"]] for qa in qa_list]
+    scores = [score for _, score in predictions_tuple]
+    acc = acc_metric.compute(predictions=predictions, references=references)
+    return predictions, acc, scores
+
+
 def format_message(sample: str, system_message: str):
     content = [
         {
@@ -121,55 +211,6 @@ def format_message(sample: str, system_message: str):
         )
 
     return conversation
-
-
-def get_text_dataset():
-    # First, fine tuning text dataset for the model
-    ds_sft_qa = load_dataset("SteveTran/naruto-instruction-prompts")
-    ds_sft_qa_wiki = (
-        ds_sft_qa["wiki"]
-        .map(
-            lambda row: {
-                "query": DEFAULT_PROMPT_FORMAT.format(row["instruction"], row["input"]),
-                "response": row["response"],
-            },
-            batched=False,
-        )
-        .shuffle()
-    )
-    ds_sft_qa_analyze = (
-        ds_sft_qa["analyze"]
-        .map(
-            lambda row: {
-                "query": DEFAULT_PROMPT_FORMAT.format(row["instruction"], row["input"]),
-                "response": row["response"],
-            },
-            batched=False,
-        )
-        .shuffle()
-    )
-
-    ds_reddit = load_dataset("SteveTran/naruto-vision-prompts")
-    ds_sft_reddit = ds_reddit["train"].filter(lambda d: d["image"] is None, num_proc=4)
-
-    ds_sft_qa = (
-        [format_message(row, DEFAULT_SYSTEM_PROMPT) for row in ds_sft_qa_wiki]
-        + [format_message(row, DEFAULT_SYSTEM_PROMPT) for row in ds_sft_qa_analyze]
-        + [format_message(row, REDDIT_SYSTEM_MESSAGE) for row in ds_sft_reddit]
-    )
-
-    return ds_sft_qa
-
-
-def get_visual_dataset():
-    ds_reddit = load_dataset("SteveTran/naruto-vision-prompts")
-    ds_sft_reddit = (
-        ds_reddit["train"]
-        .filter(lambda d: d["image"] is not None, num_proc=4)
-        .shuffle()
-    )
-
-    return [format_message(row, REDDIT_SYSTEM_MESSAGE) for row in ds_sft_reddit]
 
 
 def generate_text_from_sample(
