@@ -500,7 +500,18 @@ def get_visual_dataset():
     ds_reddit = load_dataset("SteveTran/naruto-vision-prompts")
     ds_sft_reddit = (
         ds_reddit["train"]
-        .filter(lambda d: d["image"] is not None and d["int_score"] >= 0, num_proc=4)
+        .filter(
+            lambda d: d["image"] is not None
+            and d["int_score"] >= 0
+            and "Image Captioning" in d["response"],
+            num_proc=4,
+        )
+        .map(
+            lambda d: {
+                "response": d["response"][len("[Question Type: Image Captioning]\n") :]
+            },
+            batched=False,
+        )
         .shuffle()
     )
 
