@@ -111,7 +111,7 @@ class ModelArguments:
         default=0.0,
         metadata={"help": ("LoRA dropout.")},
     )
-    lora_target_modules: Optional[List[str]] = field(
+    lora_target_modules: str = field(
         default=None,
         metadata={"help": ("LoRA target modules.")},
     )
@@ -457,18 +457,18 @@ def format_message(sample: str, system_message: str):
 def get_text_dataset():
     # First, fine tuning text dataset for the model
     ds_sft_qa = load_dataset("SteveTran/naruto-instruction-prompts")
-    ds_sft_qa_wiki = (
-        ds_sft_qa["wiki"]
-        .map(
-            lambda row: {
-                "query": DEFAULT_PROMPT_FORMAT.format(row["instruction"], row["input"]),
-                "response": row["response"],
-            },
-            batched=False,
-        )
-        .filter(lambda d: d["int_score"] >= 3, num_proc=8)
-        .shuffle()
-    )
+    # ds_sft_qa_wiki = (
+    #     ds_sft_qa["wiki"]
+    #     .map(
+    #         lambda row: {
+    #             "query": DEFAULT_PROMPT_FORMAT.format(row["instruction"], row["input"]),
+    #             "response": row["response"],
+    #         },
+    #         batched=False,
+    #     )
+    #     .filter(lambda d: d["int_score"] >= 3, num_proc=8)
+    #     .shuffle()
+    # )
     ds_sft_qa_analyze = (
         ds_sft_qa["analyze"]
         .map(
@@ -478,7 +478,7 @@ def get_text_dataset():
             },
             batched=False,
         )
-        .filter(lambda d: d["int_score"] >= 2, num_proc=8)
+        .filter(lambda d: d["int_score"] >= 1, num_proc=8)
         .shuffle()
     )
 
@@ -488,8 +488,8 @@ def get_text_dataset():
     )
 
     ds_sft_qa = (
-        [format_message(row, DEFAULT_SYSTEM_PROMPT) for row in ds_sft_qa_wiki]
-        + [format_message(row, DEFAULT_SYSTEM_PROMPT) for row in ds_sft_qa_analyze]
+        # [format_message(row, DEFAULT_SYSTEM_PROMPT) for row in ds_sft_qa_wiki]
+        [format_message(row, DEFAULT_SYSTEM_PROMPT) for row in ds_sft_qa_analyze]
         + [format_message(row, REDDIT_SYSTEM_MESSAGE) for row in ds_sft_reddit]
     )
 
@@ -500,7 +500,7 @@ def get_visual_dataset():
     ds_reddit = load_dataset("SteveTran/naruto-vision-prompts")
     ds_sft_reddit = (
         ds_reddit["train"]
-        .filter(lambda d: d["image"] is not None and d["int_score"] >= 1, num_proc=4)
+        .filter(lambda d: d["image"] is not None and d["int_score"] >= 0, num_proc=4)
         .shuffle()
     )
 
@@ -602,15 +602,15 @@ def main(seed: int = 3407):
     processor = Qwen2VLProcessor.from_pretrained(model_args.model_name)
 
     if model_args.lora_r > 0:
-        target_modules = [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "gate_proj",
-            "up_proj",
-            "down_proj",
-        ]
+        # target_modules = [
+        #     "q_proj",
+        #     "k_proj",
+        #     "v_proj",
+        #     "o_proj",
+        #     "gate_proj",
+        #     "up_proj",
+        #     "down_proj",
+        # ]
         print("Load unsloth model")
         model, tokenizer = FastVisionModel.from_pretrained(
             model_name=model_args.model_name,
@@ -634,6 +634,7 @@ def main(seed: int = 3407):
             random_state=3407,
             use_rslora=False,  # We support rank stabilized LoRA
             loftq_config=None,  # And LoftQ
+            target_modules=model_args.lora_target_modules.split(","),
             # target_modules = "all-linear", # Optional now! Can specify a list if needed
         )
         model.print_trainable_parameters()
