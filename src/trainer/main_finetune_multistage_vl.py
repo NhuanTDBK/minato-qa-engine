@@ -466,6 +466,7 @@ def get_text_dataset():
             },
             batched=False,
         )
+        .filter(lambda d: d["int_score"] >= 3, num_proc=8)
         .shuffle()
     )
     ds_sft_qa_analyze = (
@@ -477,11 +478,14 @@ def get_text_dataset():
             },
             batched=False,
         )
+        .filter(lambda d: d["int_score"] >= 2, num_proc=8)
         .shuffle()
     )
 
     ds_reddit = load_dataset("SteveTran/naruto-vision-prompts")
-    ds_sft_reddit = ds_reddit["train"].filter(lambda d: d["image"] is None, num_proc=4)
+    ds_sft_reddit = ds_reddit["train"].filter(
+        lambda d: d["image"] is None and d["int_score"] >= 1, num_proc=4
+    )
 
     ds_sft_qa = (
         [format_message(row, DEFAULT_SYSTEM_PROMPT) for row in ds_sft_qa_wiki]
@@ -496,7 +500,7 @@ def get_visual_dataset():
     ds_reddit = load_dataset("SteveTran/naruto-vision-prompts")
     ds_sft_reddit = (
         ds_reddit["train"]
-        .filter(lambda d: d["image"] is not None, num_proc=4)
+        .filter(lambda d: d["image"] is not None and d["int_score"] >= 1, num_proc=4)
         .shuffle()
     )
 
@@ -573,7 +577,7 @@ def evaluate_visual_metrics(model, processor):
     ]
     answers = [
         generate_text_from_sample(model, processor, sample, max_new_tokens=512)
-        for sample in tqdm(examples)
+        for sample in tqdm(examples, desc="Generate answers")
     ]
 
     bleu_score = bleu.compute(references=responses, predictions=answers)
@@ -666,7 +670,9 @@ def main(seed: int = 3407):
     def collate_fn(examples, contain_image=True):
         # Get the texts and images, and apply the chat template
         texts = [
-            processor.apply_chat_template(example, tokenize=False, add_generation_prompt=False)
+            processor.apply_chat_template(
+                example, tokenize=False, add_generation_prompt=False
+            )
             for example in examples
         ]  # Prepare texts for processing
 

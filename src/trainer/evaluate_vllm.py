@@ -266,11 +266,6 @@ def generate_text_from_sample(
 
 
 def evaluate_visual_metrics(model, processor):
-    import evaluate
-
-    bleu = evaluate.load("bleu")
-    rouge = evaluate.load("rouge")
-
     ds = load_dataset("SteveTran/naruto-visual-qa", split="character")
     responses = ds["answer"]
     ds_qa = ds.map(
@@ -282,11 +277,14 @@ def evaluate_visual_metrics(model, processor):
         format_message(ds_qa[i], REDDIT_SYSTEM_MESSAGE) for i in range(len(ds_qa))
     ]
     answers = [
-        generate_text_from_sample(model, processor, sample, max_new_tokens=512)
+        generate_text_from_sample(model, processor, sample, max_new_tokens=32)
         for sample in tqdm(examples)
     ]
 
-    bleu_score = bleu.compute(references=responses, predictions=answers)
-    rough_score = rouge.compute(references=responses, predictions=answers)
+    score = 0.0
+    for i in range(len(ds_qa)):
+        response_tokens = set(responses[i].split())
+        answer_tokens = set(answers[i].split())
+        score += len(response_tokens & answer_tokens) / len(answer_tokens)
 
-    return bleu_score, rough_score
+    return score / len(ds_qa)
