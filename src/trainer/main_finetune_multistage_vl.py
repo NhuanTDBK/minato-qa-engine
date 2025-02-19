@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 import torch
 from tqdm import tqdm
 from datasets import load_dataset
-from unsloth import FastVisionModel
+from liger_kernel.transformers import monkey_patch
 from accelerate import Accelerator
 from transformers import (
     set_seed,
@@ -112,7 +112,7 @@ class ModelArguments:
         metadata={"help": ("LoRA dropout.")},
     )
     lora_target_modules: str = field(
-        default=None,
+        default="q_proj,v_proj",
         metadata={"help": ("LoRA target modules.")},
     )
     lora_modules_to_save: Optional[List[str]] = field(
@@ -272,7 +272,7 @@ class SFTConfig:
         default="linear", metadata={"help": ("The learning rate scheduler type.")}
     )
     attn_implementation: Optional[str] = field(
-        default="flash_attention_2",
+        default="sdpa",
         metadata={"help": ("The attention implementation.")},
     )
     deepspeed: Optional[str] = field(
@@ -343,73 +343,6 @@ def parse_args() -> Tuple[ModelArguments, DataArguments, SFTConfig]:
 REDDIT_SYSTEM_MESSAGE = """You are an helpful assistant specialized in the Naruto universe, combining deep knowledge of the manga and anime with advanced visual analysis capabilities.
 Your task is to analyze the provided image and respond to queries with concise answers"""
 
-REDDIT_GUIDELINE = """
-# Guideline
-Identify the type of question being asked and then provide an appropriately structured response.
-## General Guidelines:
-1. First state the identified question type
-2. Follow the corresponding response structure
-3. Maintain focus on visual evidence
-4. Use canonical Naruto terminology
-5. Keep responses clear and well-organized
-
-## Visual Analysis Requirements:
-- Identify characters, jutsu, locations, and symbols
-- Recognize art style (manga/anime/fan art)
-- Detect text and integrate with visual context
-- Parse action sequences and combat dynamics
-- Interpret emotional expressions and character interactions
-## Question Type Identification:
-When receiving a query, first classify it into one of these categories:
-### Discussion Questions
-- Identified by: Open-ended prompts, requests for opinions, "what do you think about", "let's talk about"
-- Response Structure:
-  - Begin with a clear stance or observation
-  - Support with visual evidence from the image
-  - Connect to broader Naruto themes and storylines
-  - Encourage further discussion with thoughtful insights
-
-### Direct Questions
-- Identified by: Who, what, when, where, why, how queries
-- Response Structure:
-  - Provide direct answer first
-  - Support with specific visual evidence
-  - Add brief relevant context if necessary
-  - Use precise Naruto terminology
-
-### VS Battle Questions
-- Identified by: "Who would win", "vs", "stronger", "compare", "fight between"
-- Response Structure:
-  - State the combatants and battle context
-  - Analyze visual evidence of abilities shown
-  - Compare demonstrated powers and techniques
-  - Provide reasoning for outcome prediction
-
-### Theory Questions
-- Identified by: "Could it be", "what if", "theory about", "possible explanation"
-- Response Structure:
-  - Acknowledge the theoretical premise
-  - Analyze visual evidence supporting/opposing
-  - Connect with established Naruto lore
-  - Evaluate theory's plausibility
-
-### Analysis Questions
-- Identified by: "Explain", "analyze", "break down", "detail about"
-- Response Structure:
-  - State the focus of analysis
-  - Break down visual elements systematically
-  - Connect with Naruto mechanics/lore
-  - Provide technical insights
-
-### Image Captioning Requests
-- Identified by: "Describe", "what's in this image", "caption this"
-- Response Structure:
-  - Begin with scene overview
-  - Identify key characters/elements
-  - Note significant actions/emotions
-  - Include relevant Naruto-specific context
-"""
-
 DEFAULT_SYSTEM_PROMPT = "You are an helpful assistant, who are expert in Naruto manga"
 DEFAULT_PROMPT_FORMAT = """{} {}"""
 ALPACA_PROMPT_FORMAT = """
@@ -457,18 +390,18 @@ def format_message(sample: str, system_message: str):
 def get_text_dataset():
     # First, fine tuning text dataset for the model
     ds_sft_qa = load_dataset("SteveTran/naruto-instruction-prompts")
-    # ds_sft_qa_wiki = (
-    #     ds_sft_qa["wiki"]
-    #     .map(
-    #         lambda row: {
-    #             "query": DEFAULT_PROMPT_FORMAT.format(row["instruction"], row["input"]),
-    #             "response": row["response"],
-    #         },
-    #         batched=False,
-    #     )
-    #     .filter(lambda d: d["int_score"] >= 3, num_proc=8)
-    #     .shuffle()
-    # )
+    ds_sft_qa_wiki = (
+        ds_sft_qa["wiki"]
+        .map(
+            lambda row: {
+                "query": DEFAULT_PROMPT_FORMAT.format(row["instruction"], row["input"]),
+                "response": row["response"],
+            },
+            batched=False,
+        )
+        .filter(lambda d: d["int_score"] >= 3, num_proc=8)
+        .shuffle()
+    )
     ds_sft_qa_analyze = (
         ds_sft_qa["analyze"]
         .map(
@@ -478,18 +411,18 @@ def get_text_dataset():
             },
             batched=False,
         )
-        .filter(lambda d: d["int_score"] >= 1, num_proc=8)
+        .filter(lambda d: d["int_score"] >= 3, num_proc=8)
         .shuffle()
     )
 
     ds_reddit = load_dataset("SteveTran/naruto-vision-prompts")
     ds_sft_reddit = ds_reddit["train"].filter(
-        lambda d: d["image"] is None and d["int_score"] >= 1, num_proc=4
+        lambda d: d["image"] is None and d["int_score"] >= 3, num_proc=4
     )
 
     ds_sft_qa = (
-        # [format_message(row, DEFAULT_SYSTEM_PROMPT) for row in ds_sft_qa_wiki]
-        [format_message(row, DEFAULT_SYSTEM_PROMPT) for row in ds_sft_qa_analyze]
+        [format_message(row, DEFAULT_SYSTEM_PROMPT) for row in ds_sft_qa_wiki]
+        + [format_message(row, DEFAULT_SYSTEM_PROMPT) for row in ds_sft_qa_analyze]
         + [format_message(row, REDDIT_SYSTEM_MESSAGE) for row in ds_sft_reddit]
     )
 
@@ -501,16 +434,8 @@ def get_visual_dataset():
     ds_sft_reddit = (
         ds_reddit["train"]
         .filter(
-            lambda d: d["image"] is not None
-            and d["int_score"] >= 0
-            and "Image Captioning" in d["response"],
+            lambda d: d["image"] is not None and d["int_score"] >= 3,
             num_proc=4,
-        )
-        .map(
-            lambda d: {
-                "response": d["response"][len("[Question Type: Image Captioning]\n") :]
-            },
-            batched=False,
         )
         .shuffle()
     )
@@ -533,11 +458,7 @@ def generate_text_from_sample(
         add_generation_prompt=True,  # Use the sample without the system message
     )
 
-    # Process the visual input from the sample
-    if "image" not in sample or sample["image"] is None:
-        image_inputs = None
-    else:
-        image_inputs, _ = process_vision_info(sample)
+    image_inputs, _ = process_vision_info(sample)
 
     # Prepare the inputs for the model
     model_inputs = processor(
@@ -610,7 +531,32 @@ def main(seed: int = 3407):
     train_text_dataset = get_text_dataset()
     train_image_dataset = get_visual_dataset()
 
-    processor = Qwen2VLProcessor.from_pretrained(model_args.model_name)
+    quantization_config = get_quantization_config(model_args)
+    model_kwargs = dict(
+        trust_remote_code=True,
+        attn_implementation=training_args.attn_implementation,
+        torch_dtype=torch_dtype,
+        device_map=(
+            get_kbit_device_map() if quantization_config is not None else "auto"
+        ),
+        quantization_config=quantization_config,
+        low_cpu_mem_usage=True,
+    )
+
+    model = Qwen2VLForConditionalGeneration.from_pretrained(
+        model_args.model_name,
+        **model_kwargs,
+    )
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_args.model_name,
+        use_fast=True,
+        trust_remote_code=True,
+    )
+    processor = Qwen2VLProcessor.from_pretrained(model_args.model_name, use_fast=True)
+
+    if training_args.evaluate_before_training:
+        print("Evaluate before training")
+        print(evaluate_visual_metrics(model, processor))
 
     if model_args.lora_r > 0:
         # target_modules = [
@@ -622,61 +568,21 @@ def main(seed: int = 3407):
         #     "up_proj",
         #     "down_proj",
         # ]
-        print("Load unsloth model")
-        model, tokenizer = FastVisionModel.from_pretrained(
-            model_name=model_args.model_name,
-            max_seq_length=training_args.max_seq_length,
-            load_in_4bit=model_args.load_in_4bit,
-            dtype=torch_dtype,
-        )
-        if training_args.evaluate_before_training:
-            print("Evaluate before training")
-            print(evaluate_visual_metrics(model, processor))
-        model = FastVisionModel.get_peft_model(
-            model,
-            finetune_vision_layers=True,  # False if not finetuning vision layers
-            finetune_language_layers=True,  # False if not finetuning language layers
-            finetune_attention_modules=True,  # False if not finetuning attention layers
-            finetune_mlp_modules=True,  # False if not finetuning MLP layers
-            r=model_args.lora_r,  # The larger, the higher the accuracy, but might overfit
-            lora_alpha=model_args.lora_alpha,  # Recommended alpha == r at least
-            lora_dropout=model_args.lora_dropout,  # Supports any, but = 0 is optimized
-            bias="none",
-            random_state=3407,
-            use_rslora=False,  # We support rank stabilized LoRA
-            loftq_config=None,  # And LoftQ
-            target_modules=model_args.lora_target_modules.split(","),
-            # target_modules = "all-linear", # Optional now! Can specify a list if needed
-        )
-        model.print_trainable_parameters()
-        FastVisionModel.for_training(model)
-    else:
-        from liger_kernel.transformers import monkey_patch
+        from peft import LoraConfig, get_peft_model
 
-        quantization_config = get_quantization_config(model_args)
-        model_kwargs = dict(
-            trust_remote_code=True,
-            attn_implementation=training_args.attn_implementation,
-            torch_dtype=torch_dtype,
-            device_map=(
-                get_kbit_device_map() if quantization_config is not None else "auto"
-            ),
-            quantization_config=quantization_config,
-            low_cpu_mem_usage=True,
+        lora_config = LoraConfig(
+            r=model_args.lora_r,
+            lora_alpha=model_args.lora_alpha,
+            lora_dropout=model_args.lora_dropout,
+            target_modules=model_args.lora_target_modules.split(","),
+            task_type="CAUSAL_LM",
         )
-        monkey_patch.apply_liger_kernel_to_qwen2_vl()
-        model = Qwen2VLForConditionalGeneration.from_pretrained(
-            model_args.model_name,
-            **model_kwargs,
+        model = get_peft_model(model, peft_config=lora_config)
+        model.print_trainable_parameters()
+    else:
+        monkey_patch.apply_liger_kernel_to_qwen2_vl(
+            model=model,
         )
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_args.model_name,
-            use_fast=True,
-            trust_remote_code=True,
-        )
-        if training_args.evaluate_before_training:
-            print("Evaluate before training")
-            print(evaluate_visual_metrics(model, processor))
 
     # Create a data collator to encode text and image pairs
     def collate_fn(examples, contain_image=True):
@@ -742,12 +648,15 @@ def main(seed: int = 3407):
     resume_from_checkpoint = get_checkpoint(
         os.path.join(training_args.model_checkpoint_dir, "text")
     )
+    # Freeze the visual backbone
+    for param in model.visual.named_parameters():
+        param[1].requires_grad = False
+
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,
         train_dataset=train_text_dataset,
         data_collator=collate_text_fn,
-        max_seq_length=training_args.max_seq_length,
         args=AllSFTConfig(
             per_device_train_batch_size=training_args.train_batch_size,
             gradient_accumulation_steps=training_args.gradient_accumulation_steps,
@@ -773,6 +682,7 @@ def main(seed: int = 3407):
             fsdp=training_args.fsdp,
             fsdp_config=training_args.fsdp_config,
             report_to="tensorboard",
+            use_liger=False,
         ),
     )
 
@@ -781,6 +691,8 @@ def main(seed: int = 3407):
     resume_from_checkpoint = get_checkpoint(
         os.path.join(training_args.model_checkpoint_dir, "image")
     )
+    for param in model.visual.named_parameters():
+        param[1].requires_grad = True
     # Stage 2 - Visual training
     trainer = SFTTrainer(
         model=model,
@@ -817,16 +729,13 @@ def main(seed: int = 3407):
     trainer.save_model(training_args.output_data_dir)  # Local saving
     tokenizer.save_pretrained(training_args.output_data_dir)
 
-    try:
-        FastVisionModel.for_inference(model)
-    except Exception:
-        pass
-
     print(evaluate_visual_metrics(model, processor))
 
-    example = {
-        "query": "Describe about this character Jiraiya",
-    }
+    example = format_message(
+        {
+            "query": "Describe about this character Jiraiya",
+        }
+    )
     answer = generate_text_from_sample(model, processor, example, max_new_tokens=512)
     print(answer)
 

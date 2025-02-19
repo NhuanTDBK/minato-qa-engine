@@ -4,12 +4,16 @@ from argparse import ArgumentParser
 from PIL import Image
 import requests
 from io import BytesIO
-from datasets import load_dataset
 
 import torch
-from unsloth import FastVisionModel
+from datasets import load_dataset
+
 from qwen_vl_utils import process_vision_info
-from transformers import Qwen2VLProcessor
+from transformers import (
+    Qwen2VLProcessor,
+    Qwen2VLForConditionalGeneration,
+    AutoTokenizer,
+)
 
 
 def format_message(sample: str, system_message: str):
@@ -37,61 +41,43 @@ def format_message(sample: str, system_message: str):
 
 def generate_text_from_sample(
     model,
-    processor,
-    sample,
+    processor: Qwen2VLProcessor,
+    messages,
     max_new_tokens=32,
     device="cuda",
     debug=False,
     **generation_kwargs
 ):
-    # Prepare the text input by applying the chat template
-    text_input = processor.apply_chat_template(
-        sample,
-        tokenize=False,
-        add_generation_prompt=True,  # Use the sample without the system message
+    # Preparation for inference
+    text = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
     )
-    if debug:
-        print(text_input)
-
-    # Process the visual input from the sample
-    if "image" in sample and sample["image"] is not None:
-        image_inputs, _ = process_vision_info(sample)
-    else:
-        image_inputs = None
-
-    # Prepare the inputs for the model
-    model_inputs = processor(
-        text=[text_input],
+    image_inputs, video_inputs = process_vision_info(messages)
+    inputs = processor(
+        text=[text],
         images=image_inputs,
+        videos=video_inputs,
+        padding=True,
         return_tensors="pt",
-        truncation=True,
-        padding="longest",
-    ).to(
-        device
-    )  # Move inputs to the specified device
-
-    # Generate text with the model
-    generated_ids = model.generate(
-        **model_inputs, max_new_tokens=max_new_tokens, **generation_kwargs
     )
+    inputs = inputs.to(device)
 
-    # Trim the generated ids to remove the input ids
-    trimmed_generated_ids = [
+    # Inference: Generation of the output
+    generated_ids = model.generate(**inputs, max_new_tokens=max_new_tokens)
+    generated_ids_trimmed = [
         out_ids[len(in_ids) :]
-        for in_ids, out_ids in zip(model_inputs.input_ids, generated_ids)
+        for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
     ]
-
-    # Decode the output text
     output_text = processor.batch_decode(
-        trimmed_generated_ids,
+        generated_ids_trimmed,
         skip_special_tokens=True,
         clean_up_tokenization_spaces=False,
     )
+    return output_text
 
-    return output_text[0]  # Return the first decoded output text
 
-
-REDDIT_SYSTEM_MESSAGE = "You are an expert assistant specialized in the Naruto universe, combining deep knowledge of the manga and anime with advanced visual analysis capabilities"
+REDDIT_SYSTEM_MESSAGE = """You are an helpful assistant specialized in the Naruto universe, combining deep knowledge of the manga and anime with advanced visual analysis capabilities.
+Your task is to analyze the provided image and respond to queries with concise answers"""
 
 
 def get_visual_qa():
@@ -107,16 +93,28 @@ def get_visual_qa():
 
 
 if __name__ == "__main__":
-    ArgumentParser.add_argument(
-        "--model_id", type=str, default="unsloth/Qwen2-VL-2B-Instruct"
-    )
-    args = ArgumentParser().parse_args()
+    parser = ArgumentParser()
+    parser.add_argument("--model_id", type=str, default="unsloth/Qwen2-VL-2B-Instruct")
+    args = parser.parse_args()
 
     model_id = args.model_id
+    print("Model ID: ", model_id)
     processor = Qwen2VLProcessor.from_pretrained(model_id)
-    model, tokenizer = FastVisionModel.from_pretrained(model_id)
-    model = FastVisionModel.for_inference(model)
+    if "unsloth" in model_id:
+        from unsloth import FastVisionModel
 
+        model, tokenizer = FastVisionModel.from_pretrained(model_id)
+        model = FastVisionModel.for_inference(model)
+    else:
+        model = Qwen2VLForConditionalGeneration.from_pretrained(
+            model_id,
+            torch_dtype=torch.bfloat16,
+            attn_implementation="flash_attention_2",
+            device_map="auto",
+        ).to("cuda")
+        tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+    print("Test quick evaluation")
     url = "https://static.wikia.nocookie.net/naruto/images/2/21/Profile_Jiraiya.PNG/revision/latest?cb=20160115173538"
     response = requests.get(url)
     img = Image.open(BytesIO(response.content))
@@ -126,7 +124,7 @@ if __name__ == "__main__":
     model_inputs = generate_text_from_sample(
         model=model,
         processor=processor,
-        sample=conv,
+        messages=conv,
         max_new_tokens=128,
         temperature=0.7,
         debug=True,
@@ -135,13 +133,26 @@ if __name__ == "__main__":
     )
     print("Quick input: ", model_inputs)
 
+    sample = {"query": "Who is famous in name Copy Ninja?"}
+    conv = format_message(sample, REDDIT_SYSTEM_MESSAGE)
+    model_inputs = generate_text_from_sample(
+        model=model,
+        processor=processor,
+        messages=conv,
+        max_new_tokens=128,
+        repetition_penalty=1.1,
+    )
+    print("Quick input: ", model_inputs)
+
     ds_visual_qa, responses = get_visual_qa()
-    for i in range(-10, -1, 1):
+    for i in range(0, 20, 1):
         model_inputs = generate_text_from_sample(
             model=model,
             processor=processor,
-            sample=ds_visual_qa[i],
+            messages=ds_visual_qa[i],
             max_new_tokens=128,
             repetition_penalty=1.1,
+            temperature=0.7,
+            do_sample=True,
         )
         print("Prediction: {}, Actual: {}".format(model_inputs, responses[i]))
