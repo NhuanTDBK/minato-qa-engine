@@ -411,13 +411,13 @@ def get_text_dataset():
             },
             batched=False,
         )
-        .filter(lambda d: d["int_score"] >= 3, num_proc=8)
+        .filter(lambda d: d["int_score"] >= 2, num_proc=8)
         .shuffle()
     )
 
     ds_reddit = load_dataset("SteveTran/naruto-vision-prompts")
     ds_sft_reddit = ds_reddit["train"].filter(
-        lambda d: d["image"] is None and d["int_score"] >= 3, num_proc=4
+        lambda d: d["image"] is None and d["int_score"] >= 2, num_proc=4
     )
 
     ds_sft_qa = (
@@ -434,7 +434,7 @@ def get_visual_dataset():
     ds_sft_reddit = (
         ds_reddit["train"]
         .filter(
-            lambda d: d["image"] is not None and d["int_score"] >= 2,
+            lambda d: d["image"] is not None and d["int_score"] >= 1,
             num_proc=4,
         )
         .shuffle()
@@ -520,6 +520,7 @@ def evaluate_visual_metrics(model, processor):
 
 def main(seed: int = 3407):
     # Set seed for reproducibility
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     set_seed(seed)
     torch_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     model_args, data_args, training_args = parse_args()
@@ -536,9 +537,7 @@ def main(seed: int = 3407):
         trust_remote_code=True,
         attn_implementation=training_args.attn_implementation,
         torch_dtype=torch_dtype,
-        device_map=(
-            get_kbit_device_map() if quantization_config is not None else "auto"
-        ),
+        device_map=(get_kbit_device_map() if quantization_config is not None else None),
         quantization_config=quantization_config,
         low_cpu_mem_usage=True,
     )
@@ -705,21 +704,21 @@ def main(seed: int = 3407):
         model=model,
         tokenizer=tokenizer,
         train_dataset=train_image_dataset,
-        packing=False,
         data_collator=collate_image_fn,
-        max_seq_length=training_args.max_seq_length,
         args=AllSFTConfig(
             per_device_train_batch_size=training_args.train_batch_size,
             gradient_accumulation_steps=training_args.gradient_accumulation_steps,
             warmup_ratio=training_args.warmup_ratio,
             logging_dir=os.path.join(training_args.output_data_dir, "image"),
             num_train_epochs=training_args.epochs,
-            learning_rate=training_args.visual_lr,
+            learning_rate=training_args.text_lr,
             logging_steps=training_args.checkpoint_save_steps,
             optim=training_args.optim,
             weight_decay=training_args.weight_decay,
             lr_scheduler_type=training_args.lr_scheduler_type,
             seed=seed,
+            fp16=not torch.cuda.is_bf16_supported(),
+            bf16=torch.cuda.is_bf16_supported(),
             output_dir=os.path.join(training_args.model_checkpoint_dir, "image"),
             save_strategy="steps",
             save_steps=training_args.checkpoint_save_steps,
@@ -728,6 +727,9 @@ def main(seed: int = 3407):
             gradient_checkpointing=training_args.gradient_checkpointing,
             dataset_text_field="",
             dataset_kwargs={"skip_prepare_dataset": True},  # Additional dataset options
+            fsdp=training_args.fsdp,
+            fsdp_config=training_args.fsdp_config,
+            report_to="tensorboard",
         ),
     )
 
@@ -741,7 +743,8 @@ def main(seed: int = 3407):
     example = format_message(
         {
             "query": "Describe about this character Jiraiya",
-        }
+        },
+        system_message=REDDIT_SYSTEM_MESSAGE,
     )
     answer = generate_text_from_sample(model, processor, example, max_new_tokens=512)
     print(answer)
