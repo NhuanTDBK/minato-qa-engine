@@ -434,7 +434,7 @@ def get_visual_dataset():
     ds_sft_reddit = (
         ds_reddit["train"]
         .filter(
-            lambda d: d["image"] is not None and d["int_score"] >= 3,
+            lambda d: d["image"] is not None and d["int_score"] >= 2,
             num_proc=4,
         )
         .shuffle()
@@ -579,10 +579,16 @@ def main(seed: int = 3407):
         )
         model = get_peft_model(model, peft_config=lora_config)
         model.print_trainable_parameters()
+
     else:
         monkey_patch.apply_liger_kernel_to_qwen2_vl(
             model=model,
         )
+
+    try:
+        print("Model memory footprint: ", model.get_memory_footprint())
+    except Exception as e:
+        pass
 
     # Create a data collator to encode text and image pairs
     def collate_fn(examples, contain_image=True):
@@ -649,6 +655,7 @@ def main(seed: int = 3407):
         os.path.join(training_args.model_checkpoint_dir, "text")
     )
     # Freeze the visual backbone
+    print("Freeze the visual backbone")
     for param in model.visual.named_parameters():
         param[1].requires_grad = False
 
